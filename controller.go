@@ -50,11 +50,13 @@ func (c *AppController) SetSaveMenuItem(item *fyne.MenuItem) {
 
 // OnTextChanged handles text changes in the editor
 func (c *AppController) OnTextChanged(content string) {
+	// Update preview with the content
 	c.preview.UpdateContent(content)
+	
 	c.modified = true
 	c.updateTitle()
 	c.updateStatus()
-	if c.saveMenuItem != nil {
+	if c.saveMenuItem != nil && c.currentFile != nil {
 		c.saveMenuItem.Disabled = false
 	}
 }
