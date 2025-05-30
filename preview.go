@@ -3,12 +3,30 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+)
+
+// Pre-compiled regular expressions for performance
+var (
+	reHeaderHTML        = regexp.MustCompile(`^(#{1,6})\s+(.+)$`)
+	reUnorderedList     = regexp.MustCompile(`^(\s*)([-*+])\s+(.*)$`)
+	reOrderedList       = regexp.MustCompile(`^(\s*)(\d+)\.\s+(.*)$`)
+	reTaskList          = regexp.MustCompile(`^(\s*)[-*+]\s+\[([ x])\]\s+(.*)$`)
+	reTableSeparator    = regexp.MustCompile(`^[\s|:\-]+$`)
+	reLink              = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reImage             = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	reCodeSpanHTML      = regexp.MustCompile("`([^`]+)`")
+	reBoldHTML1         = regexp.MustCompile(`\*\*([^\s*].*?[^\s*])\*\*`) // More specific bold
+	reBoldHTML2         = regexp.MustCompile(`__([^\s_].*?[^\s_])__`)   // More specific bold
+	reItalicHTML1       = regexp.MustCompile(`\*([^\s*].*?[^\s*])\*`)     // More specific italic
+	reItalicHTML2       = regexp.MustCompile(`_([^\s_].*?[^\s_])_`)       // More specific italic
+	reStrikethroughHTML = regexp.MustCompile(`~~([^~]+)~~`)
 )
 
 // Preview represents the markdown preview component
@@ -22,86 +40,108 @@ type Preview struct {
 // NewPreview creates a new preview instance
 func NewPreview() *Preview {
 	p := &Preview{
-		content: widget.NewRichTextFromMarkdown(""),
+		content: widget.NewRichTextFromMarkdown(""), // Placeholder, updated by UpdateContent
 		visible: true,
 	}
-
-	// Configure the RichText widget
 	p.content.Wrapping = fyne.TextWrapWord
-
 	return p
 }
 
 // Create creates the preview UI component
 func (p *Preview) Create() fyne.CanvasObject {
-	// Create a custom scroll container with padding
 	scrollContainer := container.NewScroll(
 		container.NewPadded(p.content),
 	)
-
-	// Create the main container with a card header
 	p.container = container.NewBorder(
 		container.NewPadded(widget.NewCard("", "Preview", nil)),
 		nil, nil, nil,
 		scrollContainer,
 	)
-
 	return p.container
 }
 
 // UpdateContent updates the preview with new markdown content
 func (p *Preview) UpdateContent(markdown string) {
 	p.rawMarkdown = markdown
-
-	// Create custom rich text segments for better rendering
 	segments := p.parseMarkdownToSegments(markdown)
 	p.content.Segments = segments
 	p.content.Refresh()
 }
 
-// parseMarkdownToSegments converts markdown to RichText segments with better formatting
+// parseMarkdownToSegments converts markdown to RichText segments
 func (p *Preview) parseMarkdownToSegments(markdown string) []widget.RichTextSegment {
 	var segments []widget.RichTextSegment
 	lines := strings.Split(markdown, "\n")
 
 	inCodeBlock := false
 	codeBlockContent := ""
+	inList := false
+	// listLevel := 0 // Not strictly needed for Fyne RichText simple list model
+	inBlockquote := false
+	blockquoteLines := []string{}
+	paragraphLines := []string{}
+
+	flushParagraph := func() {
+		if len(paragraphLines) > 0 {
+			text := strings.Join(paragraphLines, "\n") // Join with newline, then parse
+			if strings.TrimSpace(text) != "" {
+				segments = append(segments, p.parseInlineMarkdown(text)...)
+				segments = append(segments, &widget.TextSegment{Text: "\n\n"}) // Paragraph separator
+			}
+			paragraphLines = []string{}
+		}
+	}
+
+	flushBlockquote := func() {
+		if len(blockquoteLines) > 0 {
+			content := strings.Join(blockquoteLines, "\n")
+			segments = append(segments, &widget.TextSegment{
+				Text: "│ ", // Blockquote indicator
+				Style: widget.RichTextStyle{
+					ColorName: theme.ColorNameDisabled,
+				},
+			})
+			// Parse inline markdown within blockquote
+			quotedSegments := p.parseInlineMarkdown(content)
+			for _, seg := range quotedSegments {
+				// Apply disabled style to text segments within the blockquote
+				if textSeg, ok := seg.(*widget.TextSegment); ok {
+					// If style is default, set disabled color. If already styled (e.g. bold), keep that but make it disabled.
+					// This simple version just sets ColorName. A more complex one might merge.
+					textSeg.Style.ColorName = theme.ColorNameDisabled
+				}
+				// Hyperlinks within blockquotes will retain their default link styling.
+			}
+			segments = append(segments, quotedSegments...)
+			segments = append(segments, &widget.TextSegment{Text: "\n\n"}) // Separator after blockquote
+			blockquoteLines = []string{}
+			inBlockquote = false
+		}
+	}
+
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
 		// Handle code blocks
-		if strings.HasPrefix(trimmed, "```") {
+		if strings.HasPrefix(line, "```") {
+			flushParagraph()
+			flushBlockquote()
 			if inCodeBlock {
-				// End of code block
-				segments = append(segments, &widget.TextSegment{
-					Text: codeBlockContent,
-					Style: widget.RichTextStyle{
-						TextStyle: fyne.TextStyle{Monospace: true},
-					},
-				})
-				segments = append(segments, &widget.TextSegment{
-					Text: "\n",
-				})
+				if codeBlockContent != "" { // Ensure content is not just empty string
+					segments = append(segments, &widget.TextSegment{
+						Text: codeBlockContent,
+						Style: widget.RichTextStyle{
+							TextStyle: fyne.TextStyle{Monospace: true},
+							ColorName: theme.ColorNameForeground, // Or a specific code color
+						},
+					})
+				}
+				segments = append(segments, &widget.TextSegment{Text: "\n\n"})
 				inCodeBlock = false
 				codeBlockContent = ""
-				} else {
-				// Start of code block
+			} else {
 				inCodeBlock = true
-				strings.TrimPrefix(trimmed, "```")
-				if i > 0 && len(segments) > 0 { // ensure segments is not empty before potentially adding a newline
-					// Add a newline before the code block if it's not the first element
-					// and the previous segment wasn't already ending with a newline or was a separator.
-					lastSeg := segments[len(segments)-1]
-					if ts, ok := lastSeg.(*widget.TextSegment); !(ok && strings.HasSuffix(ts.Text, "\n")) {
-						if _, okSep := lastSeg.(*widget.SeparatorSegment); !okSep {
-							// segments = append(segments, &widget.TextSegment{Text: "\n"})
-                            // It seems the original code tried to add a newline if i > 0, 
-                            // but code blocks often don't need an extra preceding newline if they follow other block elements directly.
-                            // Let's rely on the natural newlines or the newlines after headers/paragraphs.
-                            // The crucial part is handling the newline *after* the code block.
-						}
-					}
-				}
+				// language := strings.TrimPrefix(line, "```") // Language hint could be used later
 			}
 			continue
 		}
@@ -114,277 +154,406 @@ func (p *Preview) parseMarkdownToSegments(markdown string) []widget.RichTextSegm
 			continue
 		}
 
+		// Handle blockquotes
+		if strings.HasPrefix(trimmed, ">") { // Allow ">text" and "> text"
+			flushParagraph()
+			if !inBlockquote {
+				inBlockquote = true
+			}
+			blockquoteLines = append(blockquoteLines, strings.TrimPrefix(strings.TrimPrefix(trimmed, ">"), " "))
+			continue
+		} else if inBlockquote && trimmed != "" && !isList(trimmed) && !isHeader(trimmed) && !isRule(trimmed) { // Continue blockquote if line is not empty and not another block type
+			blockquoteLines = append(blockquoteLines, trimmed)
+			continue
+		} else if inBlockquote {
+			flushBlockquote() // End of blockquote (empty line or different block element)
+		}
+
 		// Handle headers
 		if strings.HasPrefix(trimmed, "#") {
+			flushParagraph(); flushBlockquote()
 			level := 0
-			for _, r := range trimmed {
+			textStart := 0
+			for pos, r := range trimmed {
 				if r == '#' {
 					level++
-				} else {
+				} else if r == ' ' {
+					textStart = pos + 1
+					break
+				} else { // Not a valid header (e.g. #no_space)
+					level = 0
 					break
 				}
 			}
 
-			headerText := strings.TrimSpace(trimmed[level:])
-			if i > 0 && len(segments) > 0 { // Ensure not the first line and segments exist
-				// Add a newline before header if not first element, similar to code block logic
-                lastSeg := segments[len(segments)-1]
-                if ts, ok := lastSeg.(*widget.TextSegment); !(ok && strings.HasSuffix(ts.Text, "\n")) {
-                     if _, okSep := lastSeg.(*widget.SeparatorSegment); !okSep {
-                        // segments = append(segments, &widget.TextSegment{Text: "\n"})
-                        // Again, let natural flow handle this or specific newlines from paragraph ends.
-                     }
-                }
+			if level > 0 && level <= 6 && textStart > 0 && textStart < len(trimmed) {
+				headerText := strings.TrimSpace(trimmed[textStart:])
+				segments = append(segments, &widget.TextSegment{
+					Text: headerText,
+					Style: widget.RichTextStyle{
+						SizeName:  p.getHeaderSize(level),
+						TextStyle: fyne.TextStyle{Bold: true},
+					},
+				})
+				segments = append(segments, &widget.TextSegment{Text: "\n"}) // Single newline after header text
+				if level <= 2 { // Separator for H1/H2
+					segments = append(segments, &widget.SeparatorSegment{})
+					segments = append(segments, &widget.TextSegment{Text: "\n"})
+				}
+				segments = append(segments, &widget.TextSegment{Text: "\n"}) // Extra newline for spacing after header block
+				continue
 			}
-
-			segments = append(segments, &widget.TextSegment{
-				Text: headerText,
-				Style: widget.RichTextStyle{
-					SizeName:  p.getHeaderSize(level),
-					TextStyle: fyne.TextStyle{Bold: true},
-				},
-			})
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
-
-			// Add separator for H1 and H2
-			if level <= 2 {
-				segments = append(segments, &widget.SeparatorSegment{})
-				segments = append(segments, &widget.TextSegment{Text: "\n"})
-			}
-			continue
-		}
-
-		// Handle lists
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			segments = append(segments, &widget.TextSegment{
-				Text: "• " + trimmed[2:], // Consider using widget.ListSegment for richer list support if available/desired
-			})
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
-			continue
-		}
-
-		// Handle numbered lists
-		if len(trimmed) > 2 && trimmed[1] == '.' && trimmed[0] >= '0' && trimmed[0] <= '9' {
-			// This basic handling can be improved for multi-digit numbers
-			// For now, just treat as text.
-			segments = append(segments, &widget.TextSegment{
-				Text: trimmed,
-			})
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
-			continue
-		}
-
-		// Handle blockquotes
-		if strings.HasPrefix(trimmed, "> ") {
-			segments = append(segments, &widget.TextSegment{
-				Text: "│ " + trimmed[2:],
-				Style: widget.RichTextStyle{
-					ColorName: theme.ColorNameDisabled, // Or a custom style
-				},
-			})
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
-			continue
 		}
 
 		// Handle horizontal rules
-		if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+		if isRule(trimmed) {
+			flushParagraph(); flushBlockquote()
 			segments = append(segments, &widget.SeparatorSegment{})
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
+			segments = append(segments, &widget.TextSegment{Text: "\n\n"}) // Space after HR
 			continue
 		}
 
-		// Handle images - convert to a safe placeholder
-		if strings.Contains(line, "![") && strings.Contains(line, "](") {
-			processedLine := p.processImageSyntax(line)
-			segments = append(segments, p.parseInlineMarkdown(processedLine)...)
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
-			continue
-		}
-
-		// Regular paragraph
-		if trimmed != "" {
-			segments = append(segments, p.parseInlineMarkdown(line)...)
-			segments = append(segments, &widget.TextSegment{Text: "\n"})
-		} else if i < len(lines)-1 && len(segments) > 0 {
-			// Empty line, add a visual break if it's not the start and previous wasn't already a full newline.
-			// This helps separate paragraphs.
-            lastSeg := segments[len(segments)-1]
-            if ts, ok := lastSeg.(*widget.TextSegment); ok && ts.Text == "\n" {
-                // Already have a single newline segment, maybe make it a bigger break or paragraph style
-            } else {
-			    segments = append(segments, &widget.TextSegment{Text: "\n"})
-            }
-		}
-	}
-    // Remove trailing newlines if they are redundant or ensure a single one for proper spacing
-    if len(segments) > 0 {
-        lastSeg := segments[len(segments)-1]
-        if ts, ok := lastSeg.(*widget.TextSegment); ok && ts.Text == "\n" && len(segments) > 1 {
-             prevSeg := segments[len(segments)-2]
-             if pts, ok2 := prevSeg.(*widget.TextSegment); ok2 && strings.HasSuffix(pts.Text, "\n\n") {
-                 // If previous text segment already ends with double newline, this extra \n segment might be too much
-                 // segments = segments[:len(segments)-1] // Or adjust logic for paragraph spacing
-             }
-        }
-    }
-
-
-	return segments
-}
-
-// processImageSyntax converts image markdown to a safe placeholder
-func (p *Preview) processImageSyntax(line string) string {
-	result := line
-
-	for strings.Contains(result, "![") && strings.Contains(result, "](") {
-		start := strings.Index(result, "![")
-		altEnd := strings.Index(result[start:], "]")
-		if altEnd == -1 {
-			break
-		}
-
-		urlStart := start + altEnd
-		if urlStart >= len(result) || result[urlStart:urlStart+2] != "](" {
-			break
-		}
-
-		urlEnd := strings.Index(result[urlStart+2:], ")")
-		if urlEnd == -1 {
-			break
-		}
-
-		altText := result[start+2 : start+altEnd]
-		imageURL := result[urlStart+2 : urlStart+2+urlEnd]
-
-		placeholder := fmt.Sprintf("[🖼️ Image: %s]", altText)
-		if imageURL != "" {
-			placeholder = fmt.Sprintf("[🖼️ %s: %s]", altText, imageURL)
-		}
-
-		result = result[:start] + placeholder + result[urlStart+2+urlEnd+1:]
-	}
-
-	return result
-}
-
-// parseInlineMarkdown handles inline markdown elements
-func (p *Preview) parseInlineMarkdown(text string) []widget.RichTextSegment {
-	var segments []widget.RichTextSegment
-
-	parts := strings.Split(text, "`")
-	for i, part := range parts {
-		if i%2 == 0 {
-			// Regular text - parse for other markdown
-			segments = append(segments, p.parseTextFormatting(part)...)
-		} else {
-			// Inline Code
-			if part != "" { // Avoid creating empty code segments
-				segments = append(segments, &widget.TextSegment{ // Changed to TextSegment with Monospace style
-						Text: part,
-						Style: widget.RichTextStyle{
-							TextStyle: fyne.TextStyle{Monospace: true},
-						},
-					})
-			}
-		}
-	}
-
-	return segments
-}
-
-// parseTextFormatting handles bold, italic, and links
-func (p *Preview) parseTextFormatting(text string) []widget.RichTextSegment {
-	var segments []widget.RichTextSegment
-	current := text
-
-	// This function needs a more robust parser for nested and complex cases.
-	// For now, let's handle bold and italic separately and sequentially.
-	// A better way would be to tokenize and then build segments.
-
-	// Priority: Bold (**) then Italic (*)
-	// This simplified parser doesn't handle nesting like **bold *italic* bold** well.
-
-	var process func(input string, depth int) []widget.RichTextSegment
-	process = func(input string, depth int) []widget.RichTextSegment {
-		localSegments := []widget.RichTextSegment{}
-
-		// Bold: **text** or __text__
-		if strings.Contains(input, "**") {
-			parts := strings.SplitN(input, "**", 3)
-			if len(parts) == 3 { // Found a pair
-				localSegments = append(localSegments, process(parts[0], depth+1)...)
-				localSegments = append(localSegments, &widget.TextSegment{
-					Text: parts[1],
-					Style: widget.RichTextStyle{TextStyle: fyne.TextStyle{Bold: true}},
-				})
-				localSegments = append(localSegments, process(parts[2], depth+1)...)
-				return localSegments
-			}
-		}
-		// Italic: *text* or _text_
-		if strings.Contains(input, "*") {
-			parts := strings.SplitN(input, "*", 3)
-			if len(parts) == 3 { // Found a pair
-				localSegments = append(localSegments, process(parts[0], depth+1)...)
-				localSegments = append(localSegments, &widget.TextSegment{
-					Text: parts[1],
-					Style: widget.RichTextStyle{TextStyle: fyne.TextStyle{Italic: true}},
-				})
-				localSegments = append(localSegments, process(parts[2], depth+1)...)
-				return localSegments
+		// Handle tables (check after other block elements like headers, HRs)
+		if strings.Contains(trimmed, "|") && i+1 < len(lines) && reTableSeparator.MatchString(strings.TrimSpace(lines[i+1])) {
+			if tableSegments, consumed := p.parseTable(lines, i); tableSegments != nil {
+				flushParagraph(); flushBlockquote()
+				if inList { // End previous list if any
+					segments = append(segments, &widget.TextSegment{Text: "\n"})
+					inList = false
+				}
+				segments = append(segments, tableSegments...)
+				i += consumed - 1 // outer loop will increment i
+				continue
 			}
 		}
 		
-		// Links: [text](url)
-		// Basic link detection, not exhaustive.
-		// A full regex or more complex state machine is better.
-		startLink := strings.Index(input, "[")
-		if startLink != -1 {
-			endLinkText := strings.Index(input[startLink:], "]")
-			if endLinkText != -1 {
-				endLinkText += startLink
-				if len(input) > endLinkText+1 && input[endLinkText+1] == '(' {
-					endUrl := strings.Index(input[endLinkText+2:], ")")
-					if endUrl != -1 {
-						endUrl += endLinkText + 2
-						
-						// Text before the link
-						if startLink > 0 {
-							localSegments = append(localSegments, &widget.TextSegment{Text: input[:startLink]})
-						}
-						
-						linkText := input[startLink+1 : endLinkText]
-						linkUrl := input[endLinkText+2 : endUrl]
-						
-						parsedURL, err := url.Parse(linkUrl)
-						if err == nil {
-							localSegments = append(localSegments, &widget.HyperlinkSegment{
-								Text: linkText,
-								URL:  parsedURL,
-							})
-						} else { // Fallback to text if URL is invalid
-							localSegments = append(localSegments, &widget.TextSegment{Text: fmt.Sprintf("[%s](%s)", linkText, linkUrl)})
-						}
-						
-						// Text after the link
-						if endUrl < len(input)-1 {
-							localSegments = append(localSegments, process(input[endUrl+1:], depth+1)...)
-						}
-						return localSegments
-					}
-				}
+		// Handle lists
+		isListItem := false
+		// listIndent := 0 // For RichText, visual indent is primary
+
+		if match := reUnorderedList.FindStringSubmatch(line); match != nil {
+			flushParagraph(); flushBlockquote()
+			isListItem = true
+			// listIndent = len(match[1])
+			if !inList {
+				inList = true; /* listLevel = listIndent */
+			}
+			indentStr := strings.Repeat("  ", len(match[1])/2)
+			segments = append(segments, &widget.TextSegment{Text: indentStr + "• "})
+			segments = append(segments, p.parseInlineMarkdown(match[3])...)
+			segments = append(segments, &widget.TextSegment{Text: "\n"})
+			continue
+		}
+		if match := reOrderedList.FindStringSubmatch(line); match != nil {
+			flushParagraph(); flushBlockquote()
+			isListItem = true
+			// listIndent = len(match[1])
+			if !inList {
+				inList = true; /* listLevel = listIndent */
+			}
+			indentStr := strings.Repeat("  ", len(match[1])/2)
+			segments = append(segments, &widget.TextSegment{Text: indentStr + match[2] + ". "})
+			segments = append(segments, p.parseInlineMarkdown(match[3])...)
+			segments = append(segments, &widget.TextSegment{Text: "\n"})
+			continue
+		}
+		if match := reTaskList.FindStringSubmatch(line); match != nil {
+			flushParagraph(); flushBlockquote()
+			isListItem = true
+			// listIndent = len(match[1])
+			if !inList {
+				inList = true; /* listLevel = listIndent */
+			}
+			checkbox := "☐ "
+			if match[2] == "x" { checkbox = "☑ " }
+			indentStr := strings.Repeat("  ", len(match[1])/2)
+			segments = append(segments, &widget.TextSegment{Text: indentStr + checkbox})
+			segments = append(segments, p.parseInlineMarkdown(match[3])...)
+			segments = append(segments, &widget.TextSegment{Text: "\n"})
+			continue
+		}
+
+		if !isListItem && inList { // Current line is not a list item, but we were in a list
+			inList = false
+			// Add a bit more space after a list if followed by a paragraph
+			if trimmed != "" { // Only if followed by non-empty line
+				segments = append(segments, &widget.TextSegment{Text: "\n"})
 			}
 		}
 
-
-		// If no markdown found at this level, just add as plain text
-		if input != "" {
-			localSegments = append(localSegments, &widget.TextSegment{Text: input})
+		// Handle empty lines (paragraph breaks)
+		if trimmed == "" {
+			flushParagraph() // Flushes existing paragraph and adds \n\n
+			// Multiple empty lines won't add more \n\n due to paragraphLines being empty
+			continue
 		}
-		return localSegments
+
+		// Regular paragraph line
+		paragraphLines = append(paragraphLines, line) // Keep original line for multi-line paragraphs
 	}
 
-	segments = process(current, 0)
+	flushParagraph()
+	flushBlockquote()
+	// If ending with code block, it already added \n\n. If list, might need one.
+	if inList { // Ensure space after a list if it's the last element
+		segments = append(segments, &widget.TextSegment{Text: "\n"})
+	}
+
+
+	return segments
+}
+
+// Helper functions for parseMarkdownToSegments
+func isList(trimmedLine string) bool {
+	return reUnorderedList.MatchString(trimmedLine) ||
+		reOrderedList.MatchString(trimmedLine) ||
+		reTaskList.MatchString(trimmedLine)
+}
+
+func isHeader(trimmedLine string) bool {
+	return strings.HasPrefix(trimmedLine, "#")
+}
+
+func isRule(trimmedLine string) bool {
+	return trimmedLine == "---" || trimmedLine == "***" || trimmedLine == "___"
+}
+
+
+// parseInlineMarkdown handles inline markdown elements (code, bold, italic, links, etc.)
+func (p *Preview) parseInlineMarkdown(text string) []widget.RichTextSegment {
+	var segments []widget.RichTextSegment
+	parts := p.splitByCode(text) // Handle code spans first
+
+	for i, part := range parts {
+		if i%2 == 1 { // This part is code
+			segments = append(segments, &widget.TextSegment{
+				Text: part,
+				Style: widget.RichTextStyle{
+					TextStyle: fyne.TextStyle{Monospace: true},
+					ColorName: theme.ColorNameForeground, // Or a specific code color
+				},
+			})
+		} else { // This part is regular text, parse for other inline elements
+			segments = append(segments, p.parseFormattedText(part)...)
+		}
+	}
+	return segments
+}
+
+// splitByCode splits text by backticks for code spans, preserving empty segments.
+// Output: [non-code, code, non-code, code, ..., non-code (possibly empty)]
+func (p *Preview) splitByCode(text string) []string {
+	var parts []string
+	var current strings.Builder
+	
+	start := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] == '`' {
+			// Add segment before the backtick
+			current.WriteString(text[start:i])
+			parts = append(parts, current.String())
+			current.Reset()
+			
+			// Find closing backtick
+			endCode := strings.IndexByte(text[i+1:], '`')
+			if endCode == -1 { // Unclosed backtick
+				// Treat rest of string as literal
+				current.WriteByte(text[i]) // Add the backtick itself
+				start = i + 1
+				// continue to append rest of string later
+				break 
+			}
+			// Add code content
+			parts = append(parts, text[i+1:i+1+endCode])
+			start = i + 1 + endCode + 1
+			i = start -1 // loop will increment
+		}
+	}
+	// Add any remaining part of the string
+	current.WriteString(text[start:])
+	parts = append(parts, current.String())
+	
+	// Ensure structure is [non-code (part 0)], [code (part 1)], [non-code (part 2)] ...
+    // If text starts with code, first part is empty. If ends with code, last non-code part can be empty.
+	// The loop `if i%2 == 1` handles code parts correctly.
+
+	return parts
+}
+
+
+// parseFormattedText handles links, images, and calls parseNestedStyles for bold/italic/strikethrough.
+func (p *Preview) parseFormattedText(text string) []widget.RichTextSegment {
+	var segments []widget.RichTextSegment
+	var currentText strings.Builder
+	i := 0
+
+	// First, replace images with a placeholder text representation
+	// This is simpler than trying to interleave image parsing with other formatting.
+	text = reImage.ReplaceAllStringFunc(text, func(match string) string {
+		submatches := reImage.FindStringSubmatch(match)
+		if len(submatches) == 3 {
+			altText := submatches[1]
+			// src := submatches[2] // URL not directly used in RichText for images here
+			if altText == "" {
+				altText = "image"
+			}
+			return fmt.Sprintf("[🖼️ %s]", altText) // Placeholder for image
+		}
+		return match
+	})
+
+	for i < len(text) {
+		// Check for Links: [text](url)
+		if text[i] == '[' {
+			linkMatchIndices := reLink.FindStringSubmatchIndex(text[i:])
+			if linkMatchIndices != nil && linkMatchIndices[0] == 0 { // Match starts at current position
+				if currentText.Len() > 0 {
+					segments = append(segments, &widget.TextSegment{Text: currentText.String()})
+					currentText.Reset()
+				}
+
+				linkDisplayText := text[i+linkMatchIndices[2] : i+linkMatchIndices[3]]
+				linkURL := text[i+linkMatchIndices[4] : i+linkMatchIndices[5]]
+
+				if parsedURL, err := url.Parse(linkURL); err == nil {
+					// Parse link display text for further formatting (bold, italic)
+					// Starting with a fresh style for link content.
+					linkContentSegments := p.parseNestedStyles(linkDisplayText, widget.RichTextStyle{})
+					for _, seg := range linkContentSegments {
+						if ts, ok := seg.(*widget.TextSegment); ok {
+							segments = append(segments, &widget.HyperlinkSegment{
+								Text:      ts.Text,
+								URL:       parsedURL,
+								TextStyle: ts.Style.TextStyle, // Apply text styles (bold, italic)
+							})
+						} else {
+                             // Should not happen if parseNestedStyles only produces TextSegments
+                            segments = append(segments, seg) 
+                        }
+					}
+				} else {
+					// Invalid URL, treat as plain text
+					currentText.WriteString(text[i : i+linkMatchIndices[1]])
+				}
+				i += linkMatchIndices[1]
+				continue
+			}
+		}
+
+		// If no link, it might be bold, italic, etc.
+		// This part is now handled by parseNestedStyles if we call it directly.
+		// However, parseFormattedText is the top-level for non-code, non-image text.
+		// It should break text into "link" or "other stuff".
+		// "other stuff" is then passed to parseNestedStyles.
+
+		// The current structure means parseFormattedText handles links,
+		// and for any text *not* part of a link, it should eventually be processed by parseNestedStyles.
+		// This implies that if no link is found, the character is added to currentText,
+		// and *after* the loop, currentText is processed by parseNestedStyles.
+
+		currentText.WriteByte(text[i])
+		i++
+	}
+
+	// Process any remaining text accumulated in currentText for bold/italic/strikethrough
+	if currentText.Len() > 0 {
+		segments = append(segments, p.parseNestedStyles(currentText.String(), widget.RichTextStyle{})...)
+	}
+
+	return segments
+}
+
+// parseNestedStyles recursively parses text for bold, italic, strikethrough,
+// applying them on top of a given currentStyle.
+func (p *Preview) parseNestedStyles(text string, currentStyle widget.RichTextStyle) []widget.RichTextSegment {
+	var segments []widget.RichTextSegment
+	var accumulatedText strings.Builder
+	i := 0
+
+	for i < len(text) {
+		// Precedence: Bold > Strikethrough > Italic (arbitrary but consistent)
+
+		// Bold: **text** or __text__
+		appliedStyle := false
+		if i+1 < len(text) {
+			marker := ""
+			if text[i:i+2] == "**" { marker = "**" } else if text[i:i+2] == "__" { marker = "__" }
+
+			if marker != "" {
+				endPos := strings.Index(text[i+len(marker):], marker)
+				if endPos != -1 {
+					if accumulatedText.Len() > 0 {
+						segments = append(segments, &widget.TextSegment{Text: accumulatedText.String(), Style: currentStyle})
+						accumulatedText.Reset()
+					}
+					content := text[i+len(marker) : i+len(marker)+endPos]
+					styleWithBold := currentStyle; styleWithBold.TextStyle.Bold = true
+					segments = append(segments, p.parseNestedStyles(content, styleWithBold)...)
+					i += len(marker) + endPos + len(marker)
+					appliedStyle = true
+				}
+			}
+		}
+		if appliedStyle { continue }
+
+
+		// Strikethrough: ~~text~~
+		if i+1 < len(text) && text[i:i+2] == "~~" {
+			endPos := strings.Index(text[i+2:], "~~")
+			if endPos != -1 {
+				if accumulatedText.Len() > 0 {
+					segments = append(segments, &widget.TextSegment{Text: accumulatedText.String(), Style: currentStyle})
+					accumulatedText.Reset()
+				}
+				content := text[i+2 : i+2+endPos]
+				// Strikethrough: for Fyne, often done with color. It doesn't nest other styles well if it sets color.
+				// Here, we make it a terminal style for its content for simplicity.
+				styleWithStrike := currentStyle; styleWithStrike.ColorName = theme.ColorNameDisabled
+				segments = append(segments, &widget.TextSegment{Text: content, Style: styleWithStrike})
+				i += 2 + endPos + 2
+				appliedStyle = true
+			}
+		}
+		if appliedStyle { continue }
+
+		// Italic: *text* or _text_
+		// Ensure it's not part of a bold marker already handled or a different construct.
+		if (text[i] == '*' || text[i] == '_') {
+			markerChar := text[i]
+			// Avoid consuming `*` from `**` if bold is handled by single char marker logic elsewhere.
+			// Here, bold `**` `__` is handled distinctly, so single `*` `_` are for italic.
+            // A more robust parser would check context (e.g. CommonMark rules for intra-word emphasis)
+			
+            // Basic check: not part of a longer marker like ** or __
+            if !((markerChar == '*' && i+1 < len(text) && text[i+1] == '*') ||
+                 (markerChar == '_' && i+1 < len(text) && text[i+1] == '_')) {
+
+                endPos := strings.IndexByte(text[i+1:], markerChar)
+                if endPos != -1 {
+                    // Add more sophisticated checks here for valid italic pairs if needed.
+                    if accumulatedText.Len() > 0 {
+                        segments = append(segments, &widget.TextSegment{Text: accumulatedText.String(), Style: currentStyle})
+                        accumulatedText.Reset()
+                    }
+                    content := text[i+1 : i+1+endPos]
+                    styleWithItalic := currentStyle; styleWithItalic.TextStyle.Italic = true
+                    segments = append(segments, p.parseNestedStyles(content, styleWithItalic)...)
+                    i += 1 + endPos + 1
+                    appliedStyle = true
+                }
+            }
+		}
+		if appliedStyle { continue }
+
+		// If no style marker found at i, accumulate character
+		accumulatedText.WriteByte(text[i])
+		i++
+	}
+
+	// Add any remaining accumulated plain text
+	if accumulatedText.Len() > 0 {
+		segments = append(segments, &widget.TextSegment{Text: accumulatedText.String(), Style: currentStyle})
+	}
 	return segments
 }
 
@@ -396,12 +565,7 @@ func (p *Preview) getHeaderSize(level int) fyne.ThemeSizeName {
 		return theme.SizeNameHeadingText
 	case 2:
 		return theme.SizeNameSubHeadingText
-	// Add more cases if H3, H4, etc., should have distinct sizes.
-	// Fyne's default theme may not define more than Heading and SubHeading for RichText by default.
-	default:
-		// For H3 and below, we can use bold text, or make them slightly larger than normal text
-		// if the theme supports it or by explicitly setting font size (more complex).
-		// Returning SizeNameText makes them regular size but they'll still be bolded by the TextStyle.
+	default: // H3, H4, H5, H6 get regular text size but bold (handled by caller)
 		return theme.SizeNameText
 	}
 }
@@ -416,9 +580,10 @@ func (p *Preview) ToggleVisibility() {
 	p.visible = !p.visible
 }
 
+
 // GetHTML returns the markdown converted to HTML
 func (p *Preview) GetHTML() string {
-	// Basic HTML template with styling
+	// Basic HTML template with styling (GitHub-like)
 	htmlTemplate := `<!DOCTYPE html>
 <html>
 <head>
@@ -426,517 +591,395 @@ func (p *Preview) GetHTML() string {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Markdown Export</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        article {
-            background-color: white;
-            padding: 40px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1, h2, h3, h4, h5, h6 {
-            margin-top: 24px;
-            margin-bottom: 16px;
-            font-weight: 600;
-            line-height: 1.25;
-        }
-        h1 { font-size: 2em; border-bottom: 1px solid #eee; padding-bottom: 0.3em; }
-        h2 { font-size: 1.5em; border-bottom: 1px solid #eee; padding-bottom: 0.3em; }
-        h3 { font-size: 1.25em; }
-        h4 { font-size: 1em; }
-        h5 { font-size: 0.875em; }
-        h6 { font-size: 0.85em; color: #666; }
-        code {
-            background-color: #f0f0f0; /* Slightly darker for better visibility */
-            padding: 0.2em 0.4em;
-            margin: 0;
-            font-size: 85%;
-            border-radius: 3px;
-            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
-        }
-        pre {
-            background-color: #f6f8fa;
-            padding: 16px;
-            border-radius: 6px;
-            overflow-x: auto;
-            line-height: 1.45;
-            font-size: 0.9em; /* Match GitHub's pre font-size relative to body */
-        }
-        pre code {
-            background-color: transparent;
-            padding: 0;
-            margin: 0;
-            font-size: 100%; /* Code inside pre should inherit pre's font size */
-            border-radius: 0;
-            border: 0;
-        }
-        blockquote {
-            margin: 1em 0;
-            padding: 0 1em;
-            color: #57606a; /* GitHub's blockquote color */
-            border-left: 0.25em solid #d0d7de; /* GitHub's blockquote border */
-        }
-        a {
-            color: #0969da;
-            text-decoration: none;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-        ul, ol {
-            padding-left: 2em;
-            margin-top: 0;
-            margin-bottom: 16px;
-        }
-        li {
-            margin-bottom: 0.25em;
-        }
-        hr {
-            border: 0;
-            height: 0.25em; /* Thicker hr like GitHub */
-            background: #d0d7de; /* GitHub's hr color */
-            margin: 24px 0;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-            margin-top: 8px;
-            margin-bottom: 8px;
-        }
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 16px 0;
-            display: block; /* For overflow */
-            overflow-x: auto; /* For wide tables */
-        }
-        table th, table td {
-            border: 1px solid #d0d7de; /* GitHub's table border color */
-            padding: 6px 13px; /* GitHub's table padding */
-            text-align: left;
-        }
-        table th {
-            background-color: #f6f8fa;
-            font-weight: 600;
-        }
-        p {
-             margin-top: 0;
-             margin-bottom: 16px;
-        }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; font-size: 16px; line-height: 1.5; word-wrap: break-word; color: #24292f; background-color: #ffffff; margin: 0; padding: 0; }
+        .markdown-body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; }
+        @media (max-width: 767px) { .markdown-body { padding: 15px; } }
+        h1, h2, h3, h4, h5, h6 { margin-top: 24px; margin-bottom: 16px; font-weight: 600; line-height: 1.25; }
+        h1 { font-size: 2em; } h2 { font-size: 1.5em; } h3 { font-size: 1.25em; } h4 { font-size: 1em; } h5 { font-size: .875em; } h6 { font-size: .85em; color: #57606a; }
+        h1, h2 { padding-bottom: .3em; border-bottom: 1px solid #d0d7de; }
+        p { margin-top: 0; margin-bottom: 16px; }
+        a { color: #0969da; text-decoration: none; } a:hover { text-decoration: underline; }
+        code { padding: .2em .4em; margin: 0; font-size: 85%; background-color: rgba(175,184,193,0.2); border-radius: 6px; font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace; }
+        pre { margin-top: 0; margin-bottom: 16px; padding: 16px; overflow: auto; font-size: 85%; line-height: 1.45; background-color: #f6f8fa; border-radius: 6px; word-wrap: normal;}
+        pre code { display: inline; max-width: auto; padding: 0; margin: 0; overflow: visible; line-height: inherit; background-color: transparent; border: 0; font-size: 100%; }
+        blockquote { margin: 0 0 16px; padding: 0 1em; color: #57606a; border-left: .25em solid #d0d7de; }
+        ul, ol { margin-top: 0; margin-bottom: 16px; padding-left: 2em; } ul ul, ul ol, ol ol, ol ul { margin-top:0; margin-bottom: 0; }
+        li { word-wrap: break-all; } li > p { margin-top: 16px; } li + li { margin-top: .25em; }
+        hr { height: .25em; padding: 0; margin: 24px 0; background-color: #d0d7de; border: 0; }
+        table { display: block; width: max-content; max-width:100%; overflow: auto; border-spacing: 0; border-collapse: collapse; margin-top: 0; margin-bottom: 16px; }
+        table th, table td { padding: 6px 13px; border: 1px solid #d0d7de; }
+        table th { font-weight: 600; } table tr { background-color: #ffffff; } table tr:nth-child(2n) { background-color: #f6f8fa; }
+        img { max-width: 100%; box-sizing: content-box; background-color: #ffffff; }
+        strong { font-weight: 600; } em { font-style: italic; } del { text-decoration: line-through; }
+		input[type="checkbox"] { margin-right: 0.5em; }
     </style>
 </head>
-<body>
-    <article>
-        %s
-    </article>
-</body>
+<body> <article class="markdown-body"> %s </article> </body>
 </html>`
 
-	// Convert markdown to HTML
-	html := p.convertMarkdownToHTML(p.rawMarkdown)
-
-	return fmt.Sprintf(htmlTemplate, html)
+	htmlContent := p.convertMarkdownToHTML(p.rawMarkdown)
+	return fmt.Sprintf(htmlTemplate, htmlContent)
 }
 
-// escapeHTML escapes HTML special characters minimally for content.
-// Note: Attribute values need more careful escaping (e.g., quotes).
-func escapeHTMLContent(text string) string {
-	text = strings.ReplaceAll(text, "&", "&") // Must be first
-	text = strings.ReplaceAll(text, "<", "<")
-	text = strings.ReplaceAll(text, ">", ">")
-	return text
-}
-
-// escapeHTMLAttribute escapes characters for safe use in HTML attribute values.
-func escapeHTMLAttribute(text string) string {
-	text = escapeHTMLContent(text) // Basic escaping
-	text = strings.ReplaceAll(text, "\"", "&quot;")
-	text = strings.ReplaceAll(text, "'", "'") // or ' but ' is more widely supported
-	return text
-}
-
-
-// convertMarkdownToHTML performs basic markdown to HTML conversion
+// convertMarkdownToHTML performs markdown to HTML conversion
 func (p *Preview) convertMarkdownToHTML(markdown string) string {
-	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
 	var html strings.Builder
+	lines := strings.Split(markdown, "\n")
+
 	inCodeBlock := false
 	var codeBlockLang string
-	inList := false // Generic list flag
-	listType := ""  // "ul" or "ol"
-	inParagraph := false
+	inList := false
+	listType := ""    // "ul" or "ol"
+	// listIndentStack := []int{} // For proper nested list handling (more complex)
+	inBlockquote := false
+	blockquoteBuffer := []string{} // Buffer lines for a blockquote block
 
-	closeParagraph := func() {
-		if inParagraph {
-			html.WriteString("</p>\n")
-			inParagraph = false
+	flushParagraph := func(paragraphLines []string) {
+		if len(paragraphLines) > 0 {
+			content := strings.TrimSpace(strings.Join(paragraphLines, "\n"))
+			if content != "" {
+				html.WriteString("<p>")
+				html.WriteString(p.processInlineHTML(content))
+				html.WriteString("</p>\n")
+			}
 		}
 	}
 	
-	ensureParagraph := func() {
-		if !inParagraph && !inCodeBlock && listType == "" { // Don't start <p> inside lists or code blocks
-			html.WriteString("<p>")
-			inParagraph = true
-		}
-	}
+	var currentParagraphLines []string
 
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Code blocks (```)
-		if strings.HasPrefix(line, "```") { // Use `line` not `trimmed` to preserve indentation for potential languages
-			closeParagraph()
-			if inList {
-				html.WriteString(fmt.Sprintf("</%s>\n", listType))
-				inList = false
-				listType = ""
-			}
-			if inCodeBlock {
-				html.WriteString("</code></pre>\n")
-				inCodeBlock = false
-				codeBlockLang = ""
-			} else {
-				codeBlockLang = strings.TrimPrefix(line, "```")
-				langClass := ""
-				if codeBlockLang != "" {
-					langClass = fmt.Sprintf(` class="language-%s"`, escapeHTMLAttribute(codeBlockLang))
-				}
-				html.WriteString(fmt.Sprintf("<pre><code%s>", langClass))
-				inCodeBlock = true
-			}
-			continue
-		}
-
-		if inCodeBlock {
-			html.WriteString(escapeHTMLContent(line) + "\n")
-			continue
-		}
-		
-		// Process empty lines
-		if trimmed == "" {
-			closeParagraph()
-			if inList { // Empty line might terminate a list item or the list
-				html.WriteString(fmt.Sprintf("</%s>\n", listType))
-				inList = false
-				listType = ""
-			}
-			// Add a blank line as a paragraph break if needed, or let CSS handle margin
-			// html.WriteString("<br>\n") // Or handle paragraph spacing with CSS
-			continue
-		}
-
-
-		// Headers (H1-H6)
-		if strings.HasPrefix(trimmed, "#") {
-			closeParagraph()
-			if inList {
-				html.WriteString(fmt.Sprintf("</%s>\n", listType)); inList = false; listType = ""
-			}
-			level := 0
-			textStart := 0
-			for j, r := range trimmed {
-				if r == '#' {
-					level++
-				} else if r == ' ' {
-					textStart = j + 1
-					break
-				} else { // Not a header if # is not followed by space (or EOL)
-					level = 0 
-					break
-				}
-			}
-			if textStart == 0 && level > 0 { // Handles cases like "###Header" without space
-				textStart = level
-			}
-
-
-			if level > 0 && level <= 6 {
-				headerText := p.processInlineHTML(trimmed[textStart:])
-				html.WriteString(fmt.Sprintf("<h%d>%s</h%d>\n", level, headerText, level))
-				continue
-			}
-		}
-
-		// Unordered Lists
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			closeParagraph()
-			if !inList || listType != "ul" {
-				if inList { // Close previous list if different type
-					html.WriteString(fmt.Sprintf("</%s>\n", listType))
-				}
-				html.WriteString("<ul>\n")
-				inList = true
-				listType = "ul"
-			}
-			html.WriteString(fmt.Sprintf("<li>%s</li>\n", p.processInlineHTML(trimmed[2:])))
-			continue
-		}
-		// Ordered Lists (simple check: 1. item)
-		if len(trimmed) > 2 && trimmed[1] == '.' && trimmed[0] >= '0' && trimmed[0] <= '9' {
-			isOrderedList := true
-			numStr := ""
-			for k, char := range trimmed {
-				if char >= '0' && char <= '9' {
-					numStr += string(char)
-				} else if char == '.' && k < len(trimmed)-1 && trimmed[k+1] == ' ' {
-					// Check for " ." to confirm it's part of list marker
-					break 
-				} else {
-					isOrderedList = false
-					break
-				}
-			}
-			if isOrderedList {
-				numLen := len(numStr)
-				if len(trimmed) > numLen+1 && trimmed[numLen] == '.' && trimmed[numLen+1] == ' ' {
-					closeParagraph()
-					if !inList || listType != "ol" {
-						if inList {
-							html.WriteString(fmt.Sprintf("</%s>\n", listType))
-						}
-						html.WriteString("<ol>\n") // Could add 'start' attribute if numStr != "1"
-						inList = true
-						listType = "ol"
-					}
-					html.WriteString(fmt.Sprintf("<li>%s</li>\n", p.processInlineHTML(trimmed[numLen+2:])))
-					continue
-				}
-			}
-		}
-		
-		// If current line is not a list item but we were in a list, close it.
-		if inList && !(strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || (len(trimmed) > 2 && trimmed[1] == '.' && trimmed[0] >= '0' && trimmed[0] <= '9')) {
+	closeList := func() {
+		if inList {
+			// For complex nesting, would pop from listIndentStack and close multiple lists
 			html.WriteString(fmt.Sprintf("</%s>\n", listType))
 			inList = false
 			listType = ""
 		}
+	}
+	
+	flushBlockquote := func() {
+		if inBlockquote && len(blockquoteBuffer) > 0 {
+			content := strings.Join(blockquoteBuffer, "\n")
+			html.WriteString("<blockquote>\n")
+			// Recursively convert the content of the blockquote
+			html.WriteString(p.convertMarkdownToHTML(content))
+			html.WriteString("</blockquote>\n")
+			blockquoteBuffer = []string{}
+			inBlockquote = false
+		}
+	}
 
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Code blocks
+		if strings.HasPrefix(line, "```") {
+			flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+			flushBlockquote(); closeList()
+			if inCodeBlock {
+				html.WriteString("</code></pre>\n")
+				inCodeBlock = false
+			} else {
+				inCodeBlock = true
+				codeBlockLang = escapeHTMLAttribute(strings.TrimSpace(strings.TrimPrefix(line, "```")))
+				langClass := ""
+				if codeBlockLang != "" {
+					langClass = fmt.Sprintf(` class="language-%s"`, codeBlockLang)
+				}
+				html.WriteString(fmt.Sprintf("<pre><code%s>", langClass)) // No newline after <code>
+			}
+			continue
+		}
+		if inCodeBlock {
+			html.WriteString(escapeHTMLContent(line) + "\n") // Add newline for each line in code block
+			continue
+		}
+		
+		// Check for end of blockquote if not a continued blockquote line
+		if inBlockquote && !strings.HasPrefix(trimmed, ">") {
+            // If line is empty, or starts a new element type, flush blockquote
+			if trimmed == "" || isHeader(trimmed) || isList(trimmed) || isRule(trimmed) || (strings.Contains(trimmed, "|") && i+1 < len(lines) && reTableSeparator.MatchString(strings.TrimSpace(lines[i+1]))) {
+                 flushBlockquote()
+            }
+        }
 
 		// Blockquotes
-		if strings.HasPrefix(trimmed, "> ") {
-			closeParagraph()
-			if inList {
-				html.WriteString(fmt.Sprintf("</%s>\n", listType)); inList = false; listType = ""
+		if strings.HasPrefix(trimmed, ">") {
+			flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+			closeList()
+			if !inBlockquote {
+				inBlockquote = true
 			}
-			// Recursively handle multiple > signs for nested blockquotes if desired.
-			// For now, simple blockquote.
-			html.WriteString(fmt.Sprintf("<blockquote>%s</blockquote>\n", p.processInlineHTML(trimmed[2:])))
+			blockquoteBuffer = append(blockquoteBuffer, strings.TrimPrefix(strings.TrimPrefix(trimmed, ">"), " "))
+			continue
+		}
+        // If in blockquote and line isn't empty, it might be a continuation if it's not another block type
+        if inBlockquote && trimmed != "" {
+             blockquoteBuffer = append(blockquoteBuffer, trimmed) // Add non-prefixed line as part of quote
+             continue
+        }
+
+
+		// Headers
+		if match := reHeaderHTML.FindStringSubmatch(trimmed); match != nil {
+			flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+			flushBlockquote(); closeList()
+			level := len(match[1])
+			headerText := p.processInlineHTML(match[2])
+			html.WriteString(fmt.Sprintf("<h%d>%s</h%d>\n", level, headerText, level))
 			continue
 		}
 
-		// Horizontal rule
-		if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-			closeParagraph()
-			if inList {
-				html.WriteString(fmt.Sprintf("</%s>\n", listType)); inList = false; listType = ""
-			}
+		// Horizontal rules
+		if isRule(trimmed) {
+			flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+			flushBlockquote(); closeList()
 			html.WriteString("<hr>\n")
 			continue
 		}
 		
-		// Default to paragraph if none of the above
-		// The ensureParagraph will create a <p> if not already in one.
-		// Image handling and inline HTML processing is done by p.processInlineHTML now.
-		ensureParagraph()
-		html.WriteString(p.processInlineHTML(line))
-		if i < len(lines)-1 { // Add a space to allow next line's content to flow, or <br> if strict line breaks are desired
-		    html.WriteString(" ") // Or remove, and let paragraphs handle breaks.
+		// Tables
+		if strings.Contains(trimmed, "|") && i+1 < len(lines) && reTableSeparator.MatchString(strings.TrimSpace(lines[i+1])) {
+			if tableHTML, consumed := p.convertTableToHTML(lines, i); tableHTML != "" {
+				flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+				flushBlockquote(); closeList()
+				html.WriteString(tableHTML)
+				i += consumed -1 // outer loop will increment
+				continue
+			}
 		}
 
 
+		// Lists
+		// Basic list handling, does not support complex nesting well.
+		listItem := false
+		currentListType := ""
+		listItemContent := ""
+
+		if match := reUnorderedList.FindStringSubmatch(line); match != nil { // keep original line for indent
+			listItem = true; currentListType = "ul"; listItemContent = match[3]
+		} else if match := reOrderedList.FindStringSubmatch(line); match != nil {
+			listItem = true; currentListType = "ol"; listItemContent = match[3]
+		} else if match := reTaskList.FindStringSubmatch(line); match != nil {
+			listItem = true; currentListType = "ul" // Task lists are <ul>
+			checked := ""; if match[2] == "x" { checked = " checked" }
+			listItemContent = fmt.Sprintf(`<input type="checkbox" disabled%s> %s`, checked, match[3])
+		}
+
+		if listItem {
+			flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+			flushBlockquote()
+			// indent := len(reUnorderedList.FindStringSubmatch(line)[1]) // Example, needs proper regex matching
+			if !inList || listType != currentListType /* || indent != currentIndent */ {
+				closeList() // Close previous list if type changes or indent changes significantly
+				html.WriteString(fmt.Sprintf("<%s>\n", currentListType))
+				inList = true
+				listType = currentListType
+				// currentIndent = indent
+			}
+			html.WriteString(fmt.Sprintf("<li>%s</li>\n", p.processInlineHTML(listItemContent)))
+			continue
+		}
+		
+		// If we were in a list, but current line is not a list item
+		if inList && trimmed != "" { // An indented non-list item line might be part of previous li (complex)
+			closeList()
+		} else if inList && trimmed == "" {
+            // Empty line in a list might continue the list or break it.
+            // For simplicity, let's say an empty line *after* list items might mean end of list.
+            // This is tricky. If next line is indented list item, list continues.
+            // The logic here assumes non-list item means list ends.
+		}
+
+
+		// Paragraphs and empty lines
+		if trimmed == "" {
+			flushParagraph(currentParagraphLines); currentParagraphLines = []string{}
+			// An empty line could also terminate a list if not handled above
+			if inList { closeList() } 
+			if inBlockquote { flushBlockquote() } // Empty line also ends blockquote
+		} else {
+			currentParagraphLines = append(currentParagraphLines, line)
+		}
 	}
 
-	closeParagraph() // Close any dangling paragraph
-	if inList { // Close any dangling list
-		html.WriteString(fmt.Sprintf("</%s>\n", listType))
-	}
+	flushParagraph(currentParagraphLines)
+	flushBlockquote()
+	closeList()
 
 	return html.String()
 }
 
 
-// convertImageToHTML converts markdown image syntax to HTML
-func (p *Preview) convertImageToHTML(altText, imageURL string) string {
-	return fmt.Sprintf(`<img src="%s" alt="%s">`, escapeHTMLAttribute(imageURL), escapeHTMLAttribute(altText))
-}
-
 // processInlineHTML handles inline markdown elements for HTML conversion
 func (p *Preview) processInlineHTML(text string) string {
-    // Order of replacement matters: Strong before Em, and escape HTML first.
-    // This is a simplified parser. A regex-based or proper tokenizer/parser would be more robust.
-    
-    // Phase 1: Handle images ![alt](url)
-    // This needs to run before other transformations that might break the image syntax.
-    var processedText strings.Builder
-    lastIndex := 0
-    for {
-        imgTagStart := strings.Index(text[lastIndex:], "![")
-        if imgTagStart == -1 {
-            processedText.WriteString(text[lastIndex:])
-            break
-        }
-        imgTagStart += lastIndex // Adjust to absolute index in `text`
+	// Order of replacement is important.
+	// 1. Escape HTML special characters to prevent XSS or misinterpretation.
+	processedText := escapeHTMLContent(text)
 
-        altEnd := strings.Index(text[imgTagStart+2:], "]")
-        if altEnd == -1 {
-            processedText.WriteString(text[lastIndex:]) // Malformed, write rest and stop
-            break
-        }
-        altEnd += imgTagStart + 2 // Absolute index of ']'
+	// 2. Code spans `code` (should be processed before other formatting like * or _)
+	processedText = reCodeSpanHTML.ReplaceAllString(processedText, "<code>$1</code>")
 
-        if altEnd+1 >= len(text) || text[altEnd+1] != '(' {
-            processedText.WriteString(text[lastIndex:altEnd+1]) // Not an image link, write up to ']' and continue
-            lastIndex = altEnd + 1
-            continue
-        }
-        
-        urlEnd := strings.Index(text[altEnd+2:], ")")
-        if urlEnd == -1 {
-            processedText.WriteString(text[lastIndex:]) // Malformed, write rest and stop
-            break
-        }
-        urlEnd += altEnd + 2 // Absolute index of ')'
+	// 3. Images ![alt](src)
+	processedText = reImage.ReplaceAllStringFunc(processedText, func(match string) string {
+		submatches := reImage.FindStringSubmatch(match) // Use the precompiled reImage
+		if len(submatches) == 3 {
+			altText := submatches[1]
+			src := submatches[2]
+			return fmt.Sprintf(`<img src="%s" alt="%s">`, escapeHTMLAttribute(src), escapeHTMLAttribute(altText))
+		}
+		return match
+	})
 
-        altText := text[imgTagStart+2 : altEnd]
-        imageURL := text[altEnd+2 : urlEnd]
+	// 4. Links [text](url)
+	processedText = reLink.ReplaceAllStringFunc(processedText, func(match string) string {
+		submatches := reLink.FindStringSubmatch(match) // Use the precompiled reLink
+		if len(submatches) == 3 {
+			linkText := submatches[1] // Link text itself might contain other inline markdown (e.g. bold)
+			href := submatches[2]
+			// Recursively process link text for other inline elements (bold, italic, etc.)
+			// but not for nested links or images.
+			// A simplified approach for HTML: process bold/italic inside linkText *after* link tag is formed on raw linkText.
+			// Or, process linkText for bold/italic, then use that as the display.
+			// For now, keep it simple: linkText is used as is, then outer formatting applies.
+			// The regexes below for bold/italic will catch them if they are outside links.
+			// To process *inside* links, process linkText:
+			// processedLinkText := p.processInlineHTML(linkText) // Careful: recursion and context
+			return fmt.Sprintf(`<a href="%s">%s</a>`, escapeHTMLAttribute(href), linkText) // Simpler: linkText as is
+		}
+		return match
+	})
 
-        processedText.WriteString(text[lastIndex:imgTagStart]) // Text before image
-        processedText.WriteString(p.convertImageToHTML(altText, imageURL)) // Image HTML
-        lastIndex = urlEnd + 1
-    }
-    text = processedText.String()
+	// 5. Bold **text** or __text__
+	processedText = reBoldHTML1.ReplaceAllString(processedText, "<strong>$1</strong>")
+	processedText = reBoldHTML2.ReplaceAllString(processedText, "<strong>$1</strong>")
 
+	// 6. Italic *text* or _text_ (must come after bold to handle * vs **)
+	processedText = reItalicHTML1.ReplaceAllString(processedText, "<em>$1</em>")
+	processedText = reItalicHTML2.ReplaceAllString(processedText, "<em>$1</em>")
 
-    // Phase 2: Handle links [text](url) - must be after images to avoid conflict
-    processedText.Reset()
-    lastIndex = 0
-    for {
-        linkStart := strings.Index(text[lastIndex:], "[")
-        if linkStart == -1 {
-            processedText.WriteString(text[lastIndex:])
-            break
-        }
-        linkStart += lastIndex
-
-        linkTextEnd := strings.Index(text[linkStart+1:], "]")
-        if linkTextEnd == -1 {
-            processedText.WriteString(text[lastIndex:])
-            break
-        }
-        linkTextEnd += linkStart + 1
-
-        if linkTextEnd+1 >= len(text) || text[linkTextEnd+1] != '(' {
-            processedText.WriteString(text[lastIndex : linkTextEnd+1])
-            lastIndex = linkTextEnd + 1
-            continue
-        }
-        
-        urlContentEnd := strings.Index(text[linkTextEnd+2:], ")")
-        if urlContentEnd == -1 {
-            processedText.WriteString(text[lastIndex:])
-            break
-        }
-        urlContentEnd += linkTextEnd + 2
-
-        linkText := text[linkStart+1 : linkTextEnd]
-        url := text[linkTextEnd+2 : urlContentEnd]
-
-        processedText.WriteString(escapeHTMLContent(text[lastIndex:linkStart]))
-        // The linkText itself might contain inline markdown (e.g., bold text in link)
-        // For simplicity, we are escaping it directly here. A recursive call would be needed for nested markdown.
-        processedText.WriteString(fmt.Sprintf(`<a href="%s">%s</a>`, escapeHTMLAttribute(url), p.processInlineHTML(linkText))) // Recursive call for linkText
-        lastIndex = urlContentEnd + 1
-    }
-    text = processedText.String()
-
-    // Phase 3: Handle strong, em, code after links and images are converted to HTML tags
-    // to prevent their content from being markdown-processed.
-    // This simple replace approach is fragile for nested/overlapping cases.
-    // A proper parser would tokenize based on delimiters.
-    
-    // Temporarily replace HTML tags to protect them from markdown processing
-    // This is a common trick but has its limitations
-    tempTags := make(map[string]string)
-    tagCounter := 0
-    protectTag := func(htmlTag string) string {
-        placeholder := fmt.Sprintf("HTMLTAG%dPLACEHOLDER", tagCounter)
-        tagCounter++
-        tempTags[placeholder] = htmlTag
-        return placeholder
-    }
-    
-    // Protect existing a and img tags generated above
-    text = strings.ReplaceAll(text, "</a>", protectTag("</a>"))
-    // Regex would be better for <a href="..."> and <img src="...">
-    // Simple string replace for now - this is not robust
-    // This protection step becomes very complex with attributes.
-
-    text = escapeHTMLContent(text) // Escape remaining text *before* applying markdown formatting tags
-    
-    // Bold (matches __text__ or **text**)
-    text = replacePattern(text, "**", "**", "<strong>", "</strong>", false)
-    text = replacePattern(text, "__", "__", "<strong>", "</strong>", false)
-    // Italic (matches _text_ or *text*)
-    text = replacePattern(text, "*", "*", "<em>", "</em>", false)
-    text = replacePattern(text, "_", "_", "<em>", "</em>", false)
-    // Inline Code (matches `text`)
-    text = replacePattern(text, "`", "`", "<code>", "</code>", true) // `true` to not escape content inside code
-
-
-    // Restore protected HTML tags
-    for placeholder, originalTag := range tempTags {
-        text = strings.ReplaceAll(text, placeholder, originalTag)
-    }
-
-    return text
+	// 7. Strikethrough ~~text~~
+	processedText = reStrikethroughHTML.ReplaceAllString(processedText, "<del>$1</del>")
+	
+	return processedText
 }
 
-// replacePattern replaces markdown patterns with HTML.
-// `contentAlreadyEscaped` indicates if the content between delimiters should avoid double-escaping.
-// `isCode` means the content should not be processed for further markdown.
-func replacePattern(text, startDelim, endDelim, startTag, endTag string, isCode bool) string {
-	var result strings.Builder
-	lastIndex := 0
 
-	for {
-		start := strings.Index(text[lastIndex:], startDelim)
-		if start == -1 {
-			result.WriteString(text[lastIndex:])
-			break
+// escapeHTMLContent escapes HTML special characters
+func escapeHTMLContent(text string) string {
+	text = strings.ReplaceAll(text, "&", "&")
+	text = strings.ReplaceAll(text, "<", "<")
+	text = strings.ReplaceAll(text, ">", ">")
+	return text
+}
+
+// escapeHTMLAttribute escapes characters for HTML attributes
+func escapeHTMLAttribute(text string) string {
+	text = escapeHTMLContent(text) // Basic escaping first
+	text = strings.ReplaceAll(text, "\"", "&quot;")
+	text = strings.ReplaceAll(text, "'", "'") // ' is not universally supported in HTML4
+	return text
+}
+
+// parseTable attempts to parse lines as a markdown table for RichText
+func (p *Preview) parseTable(lines []string, startIndex int) ([]widget.RichTextSegment, int) {
+	// Assumes caller has already checked for valid table start (line with | and separator line)
+	var segments []widget.RichTextSegment
+	// segments = append(segments, &widget.TextSegment{Text: "\n"}) // Space before table
+
+	headerLine := strings.TrimSpace(lines[startIndex])
+	// Separator line is lines[startIndex+1]
+
+	numConsumed := 0
+	// Process header
+	headerCells := strings.Split(strings.Trim(headerLine, "|"), "|")
+	for j, cell := range headerCells {
+		trimmedCell := strings.TrimSpace(cell)
+		if trimmedCell != "" {
+			segments = append(segments, &widget.TextSegment{
+				Text:  trimmedCell,
+				Style: widget.RichTextStyle{TextStyle: fyne.TextStyle{Bold: true}},
+			})
 		}
-		start += lastIndex // Adjust to absolute index
-
-		// Write text before the match
-		result.WriteString(text[lastIndex:start])
-
-		// Find end delimiter
-		afterStartDelim := start + len(startDelim)
-		end := strings.Index(text[afterStartDelim:], endDelim)
-		if end == -1 { // No closing delimiter, treat startDelim as literal
-			result.WriteString(text[start:]) // Write from startDelim to end of string
-			lastIndex = len(text)
-			break
+		if j < len(headerCells)-1 {
+			segments = append(segments, &widget.TextSegment{Text: " | "}) // Visual separator
 		}
-		end += afterStartDelim // Adjust to absolute index
-
-		content := text[afterStartDelim:end]
-        // If it's not code, content might need further processing or is already (partially) HTML.
-        // If it IS code, we want the raw content without further HTML escaping.
-        // The `escapeHTMLContent` in `processInlineHTML` has already escaped the bulk.
-        // Here, we are wrapping, so content should generally be passed through.
-
-		result.WriteString(startTag)
-        result.WriteString(content) // Content is assumed to be appropriately handled/escaped before this function for non-code
-		result.WriteString(endTag)
-
-		lastIndex = end + len(endDelim)
 	}
-	return result.String()
+	segments = append(segments, &widget.TextSegment{Text: "\n"})
+	numConsumed++
+
+	// Add visual separator for RichText (replaces the ---|--- line)
+	segments = append(segments, &widget.SeparatorSegment{})
+	segments = append(segments, &widget.TextSegment{Text: "\n"})
+	numConsumed++
+
+
+	// Process body rows
+	for i := startIndex + 2; i < len(lines); i++ {
+		line := lines[i]
+		trimmedLine := strings.TrimSpace(line)
+		if !strings.Contains(trimmedLine, "|") || !strings.HasPrefix(trimmedLine, "|") && !strings.HasSuffix(trimmedLine, "|") && len(strings.Split(trimmedLine, "|")) <=1  {
+			break // End of table
+		}
+		
+		rowCells := strings.Split(strings.Trim(trimmedLine, "|"), "|")
+		for j, cell := range rowCells {
+			trimmedCell := strings.TrimSpace(cell)
+			// For RichText, inline markdown in table cells is complex, so render as plain text.
+			if trimmedCell != "" {
+				segments = append(segments, &widget.TextSegment{Text: trimmedCell})
+			}
+			if j < len(rowCells)-1 {
+				segments = append(segments, &widget.TextSegment{Text: " | "})
+			}
+		}
+		segments = append(segments, &widget.TextSegment{Text: "\n"})
+		numConsumed++
+	}
+	
+	segments = append(segments, &widget.TextSegment{Text: "\n"}) // Space after table
+	return segments, numConsumed
 }
+
+// convertTableToHTML converts markdown table lines to HTML
+func (p *Preview) convertTableToHTML(lines []string, startIndex int) (string, int) {
+	// Assumes caller has already checked for valid table start
+	var html strings.Builder
+	html.WriteString("<table>\n<thead>\n<tr>\n")
+
+	headerLine := strings.TrimSpace(lines[startIndex])
+	numConsumed := 0
+
+	// Parse header
+	headers := strings.Split(strings.Trim(headerLine, "|"), "|")
+	for _, header := range headers {
+		trimmedHeader := strings.TrimSpace(header)
+		// processInlineHTML for content within th/td
+		html.WriteString(fmt.Sprintf("<th>%s</th>\n", p.processInlineHTML(trimmedHeader)))
+	}
+	html.WriteString("</tr>\n</thead>\n<tbody>\n")
+	numConsumed += 2 // Header line + separator line
+
+	// Parse body rows
+	for i := startIndex + 2; i < len(lines); i++ {
+		line := lines[i]
+		trimmedLine := strings.TrimSpace(line)
+        // More robust check for end of table: if line doesn't look like a table row.
+		if !strings.Contains(trimmedLine, "|") || (!strings.HasPrefix(trimmedLine, "|") && !strings.HasSuffix(trimmedLine, "|") && len(strings.Split(trimmedLine, "|")) <= 1) {
+			break 
+		}
+
+		html.WriteString("<tr>\n")
+		cells := strings.Split(strings.Trim(trimmedLine, "|"), "|")
+		for _, cell := range cells {
+			trimmedCell := strings.TrimSpace(cell)
+			html.WriteString(fmt.Sprintf("<td>%s</td>\n", p.processInlineHTML(trimmedCell)))
+		}
+		html.WriteString("</tr>\n")
+		numConsumed++
+	}
+
+	html.WriteString("</tbody>\n</table>\n")
+	return html.String(), numConsumed
+}
+
