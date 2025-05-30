@@ -1,10 +1,21 @@
 # Markdown Editor
 
-A cross-platform markdown editor built with Go and Fyne framework. This project was developed as part of my journey learning Go programming language while creating a practical and useful tool.
+<div align="center">
+  <img src="icon.png" alt="Markdown Editor Icon" width="128" height="128">
+  
+  A cross-platform markdown editor built with Go and Fyne framework. This project was developed as part of my journey learning Go programming language while creating a practical and useful tool.
 
 ![Go Version](https://img.shields.io/badge/Go-1.24.3-00ADD8?style=flat&logo=go)
 ![Fyne Version](https://img.shields.io/badge/Fyne-2.6.1-00ADD8?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
+
+</div>
+
+## 📸 Screenshot
+
+<div align="center">
+  <img src="app.png" alt="Markdown Editor Screenshot" width="800">
+</div>
 
 ## 🎯 Project Motivation
 
@@ -56,6 +67,7 @@ As someone learning Go, I wanted to build something beyond simple tutorials - a 
 
 - **Language**: Go 1.24.3
 - **GUI Framework**: Fyne v2.6.1
+- **Markdown Parser**: Goldmark
 - **Architecture**: MVC-like pattern with separation of concerns
 - **Platform Support**: Windows, macOS, Linux
 
@@ -71,6 +83,9 @@ fynemd/
 ├── toolbar.go       # Toolbar implementation
 ├── statusbar.go     # Status bar component
 ├── theme.go         # Custom theme definition
+├── FyneApp.toml     # Application metadata
+├── icon.png         # Application icon
+├── image.png        # Screenshot
 ├── go.mod           # Go module definition
 ├── go.sum           # Dependency checksums
 └── README.md        # This file
@@ -120,6 +135,23 @@ GOOS=darwin GOARCH=amd64 go build -o markdown-editor
 
 # For Linux
 GOOS=linux GOARCH=amd64 go build -o markdown-editor
+```
+
+### Packaging with Fyne
+
+To create a distributable package with icon:
+
+```bash
+# Install fyne tool
+go install fyne.io/tools/cmd/fyne@latest
+
+# Package for current platform
+fyne package -release
+
+# Or specify platform
+fyne package -os windows -release
+fyne package -os darwin -release
+fyne package -os linux -release
 ```
 
 ## 💡 Learning Highlights
@@ -175,6 +207,7 @@ As this is a learning project, I welcome contributions, suggestions, and feedbac
 
 - The Go team for creating such an elegant language
 - The Fyne team for the excellent GUI framework
+- The Goldmark team for the robust markdown parser
 - The Go community for amazing learning resources
 - Everyone who creates and shares markdown editors that inspired this project
 
@@ -189,4 +222,6 @@ If you're also learning Go, here are resources I found helpful:
 
 ---
 
-_This project is part of my Go learning journey. If you're also learning Go, I hope this code helps you as much as building it helped me!_
+<div align="center">
+  <i>This project is part of my Go learning journey. If you're also learning Go, I hope this code helps you as much as building it helped me!</i>
+</div>
