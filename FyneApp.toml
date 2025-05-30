@@ -1,0 +1,8 @@
+[Details]
+  Name = "Markdown Editor"
+  ID = "com.github.nattie-nkosi.markdown"
+  Version = "1.0.0"
+  Build = 2
+
+[Release]
+  Developer = "Nattie Nkosi"
