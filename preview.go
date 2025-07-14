@@ -69,9 +69,11 @@ func (p *Preview) Create() fyne.CanvasObject {
 func (p *Preview) UpdateContent(markdown string) {
 	p.rawMarkdown = markdown
 	
-	// For simple preview, just use Fyne's built-in markdown support
-	// It handles most common markdown elements well enough
-	p.content.ParseMarkdown(markdown)
+	var buf bytes.Buffer
+	if err := p.md.Convert([]byte(markdown), &buf); err != nil {
+		buf.WriteString(fmt.Sprintf("<p>Error converting markdown: %v</p>", err))
+	}
+	p.content.ParseMarkdown(buf.String())
 }
 
 // ToggleVisibility toggles the preview pane visibility
