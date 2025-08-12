@@ -15,26 +15,26 @@ import (
 
 // Preview represents the markdown preview component
 type Preview struct {
-    content     *widget.RichText
-    container   *fyne.Container
-    visible     bool
-    rawMarkdown string
-    md          goldmark.Markdown
+	content     *widget.RichText
+	container   *fyne.Container
+	scrollContainer *container.Scroll
+	visible     bool
+	rawMarkdown string
+	md          goldmark.Markdown
 }
 
 // NewPreview creates a new preview instance
 func NewPreview() *Preview {
-	// Configure goldmark with common extensions
 	md := goldmark.New(
 		goldmark.WithExtensions(
-			extension.GFM,           // GitHub Flavored Markdown (tables, strikethrough, etc.)
-			extension.Typographer,   // Smart quotes and dashes
+			extension.GFM,
+			extension.Typographer,
 		),
 		goldmark.WithParserOptions(
 			parser.WithAutoHeadingID(),
 		),
 		goldmark.WithRendererOptions(
-			html.WithUnsafe(), // Allow raw HTML
+			html.WithUnsafe(),
 		),
 	)
 
@@ -49,18 +49,16 @@ func NewPreview() *Preview {
 
 // Create creates the preview UI component
 func (p *Preview) Create() fyne.CanvasObject {
-	// Simple container with the RichText widget
-	scrollContainer := container.NewScroll(
+	p.scrollContainer = container.NewScroll(
 		container.NewPadded(p.content),
 	)
 	
-	// Card header for the preview
 	header := widget.NewCard("", "Preview", nil)
 	
 	p.container = container.NewBorder(
 		container.NewPadded(header),
 		nil, nil, nil,
-		scrollContainer,
+		p.scrollContainer,
 	)
 	return p.container
 }
@@ -69,15 +67,21 @@ func (p *Preview) Create() fyne.CanvasObject {
 func (p *Preview) UpdateContent(markdown string) {
 	p.rawMarkdown = markdown
 	
-	var buf bytes.Buffer
-	if err := p.md.Convert([]byte(markdown), &buf); err != nil {
-		buf.WriteString(fmt.Sprintf("<p>Error converting markdown: %v</p>", err))
+	// Use Fyne's built-in markdown parsing for the preview
+	p.content.ParseMarkdown(markdown)
+	
+	// Refresh the scroll container to ensure proper rendering
+	if p.scrollContainer != nil {
+		p.scrollContainer.Refresh()
 	}
-	p.content.ParseMarkdown(buf.String())
 }
 
 // ToggleVisibility toggles the preview pane visibility
 func (p *Preview) ToggleVisibility() {
+	if p.container == nil {
+		return
+	}
+	
 	if p.visible {
 		p.container.Hide()
 	} else {
@@ -86,16 +90,14 @@ func (p *Preview) ToggleVisibility() {
 	p.visible = !p.visible
 }
 
-// GetHTML returns the markdown converted to HTML using goldmark
+// GetHTML returns the markdown converted to HTML
 func (p *Preview) GetHTML() string {
 	var buf bytes.Buffer
 	
-	// Convert markdown to HTML using goldmark
 	if err := p.md.Convert([]byte(p.rawMarkdown), &buf); err != nil {
 		return fmt.Sprintf("<p>Error converting markdown: %v</p>", err)
 	}
 	
-	// Wrap in a simple HTML template with basic styling
 	htmlTemplate := `<!DOCTYPE html>
 <html>
 <head>

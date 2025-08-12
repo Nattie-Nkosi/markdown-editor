@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -54,61 +53,40 @@ func (e *Editor) GetContent() string {
 
 // InsertMarkdown inserts markdown syntax around selected text or at cursor
 func (e *Editor) InsertMarkdown(before, after string, placeholder string) {
-	selectedText := e.entry.SelectedText()
-	
-	if selectedText == "" {
-		// No selection, insert at cursor with placeholder
-		e.entry.TypedRune([]rune(before + placeholder + after)[0])
-		for _, r := range (before + placeholder + after)[1:] {
+	// Get current position (approximate using selection)
+	if e.entry.SelectedText() != "" {
+		// Wrap selected text
+		newText := before + e.entry.SelectedText() + after
+		e.entry.TypedRune([]rune(newText)[0])
+		for _, r := range newText[1:] {
 			e.entry.TypedRune(r)
 		}
 	} else {
-		// Replace selection with wrapped text
-		replacement := before + selectedText + after
-		e.entry.TypedRune([]rune(replacement)[0])
-		for _, r := range replacement[1:] {
-			e.entry.TypedRune(r)
+		// Insert with placeholder
+		insertText := before + placeholder + after
+		// Get current content and append
+		currentText := e.entry.Text
+		e.entry.SetText(currentText + insertText)
+		// Try to position cursor between markers
+		if placeholder != "" {
+			// Select the placeholder text for easy replacement
+			startPos := len(currentText) + len(before)
+			// Note: Fyne doesn't have direct selection API, but we can approximate
+			e.entry.CursorRow = strings.Count(currentText[:startPos], "\n")
 		}
 	}
 }
 
 // InsertAtLineStart inserts text at the beginning of the current line
 func (e *Editor) InsertAtLineStart(prefix string) {
-	// Get current text and selection
 	text := e.entry.Text
 	
-	// Since we can't get cursor position directly, we'll work with the current selection
-	// or insert at the end if there's no selection
-	selectedText := e.entry.SelectedText()
-	
-	if selectedText != "" {
-		// Find the start of the line containing the selection
-		beforeSelection := strings.Split(text, selectedText)[0]
-		lineStart := strings.LastIndex(beforeSelection, "\n") + 1
-		
-		// Check if line already starts with this prefix
-		afterLineStart := text[lineStart:]
-		lineEnd := strings.Index(afterLineStart, "\n")
-		if lineEnd == -1 {
-			lineEnd = len(afterLineStart)
-		}
-		
-		currentLine := afterLineStart[:lineEnd]
-		if strings.HasPrefix(strings.TrimSpace(currentLine), strings.TrimSpace(prefix)) {
-			// Line already has this prefix, don't add another
-			return
-		}
-		
-		// Insert prefix at line start
-		newText := text[:lineStart] + prefix + text[lineStart:]
-		e.entry.SetText(newText)
+	// Simple approach: just insert the prefix
+	// Since we can't get exact cursor position, append to current text
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		e.entry.SetText(text + "\n" + prefix)
 	} else {
-		// No selection, insert at current line
-		// This is a simplified approach - just add the prefix
-		e.entry.TypedRune([]rune(prefix)[0])
-		for _, r := range prefix[1:] {
-			e.entry.TypedRune(r)
-		}
+		e.entry.SetText(text + prefix)
 	}
 }
 
@@ -117,59 +95,60 @@ func (e *Editor) ShowFindDialog() {
 	findEntry := widget.NewEntry()
 	findEntry.PlaceHolder = "Find text..."
 	
-	var lastFoundIndex int
+	resultLabel := widget.NewLabel("")
 	
-	content := widget.NewCard("Find", "", findEntry)
-	content.Resize(fyne.NewSize(300, 100))
-	
-	findFunc := func() {
-		searchText := findEntry.Text
-		if searchText == "" {
-			return
-		}
-		
-		text := e.entry.Text
-		
-		// Find next occurrence
-		index := strings.Index(text[lastFoundIndex:], searchText)
-		if index >= 0 {
-			// Found a match
-			foundAt := lastFoundIndex + index
-			lastFoundIndex = foundAt + 1
-			
-			// Highlight the found text by selecting it
-			// Note: Fyne doesn't provide direct selection API, 
-			// so we'll show a notification of where it was found
-			dialog.ShowInformation("Found", 
-				fmt.Sprintf("Found at position %d", foundAt), 
-				e.controller.window)
-		} else {
-			// No more matches, wrap around
-			lastFoundIndex = 0
-			index = strings.Index(text, searchText)
-			if index >= 0 {
-				dialog.ShowInformation("Found", 
-					fmt.Sprintf("Found at position %d (wrapped)", index), 
-					e.controller.window)
-				lastFoundIndex = index + 1
-			} else {
-				dialog.ShowInformation("Not Found", 
-					fmt.Sprintf("'%s' not found", searchText), 
-					e.controller.window)
-			}
-		}
-	}
-	
-	findEntry.OnSubmitted = func(s string) { findFunc() }
+	content := container.NewVBox(
+		widget.NewLabel("Find:"),
+		findEntry,
+		resultLabel,
+	)
 	
 	d := dialog.NewCustom("Find", "Close", content, e.controller.window)
 	
-	// Add Find Next button
+	lastIndex := 0
+	
+	findNext := func() {
+		searchText := findEntry.Text
+		if searchText == "" {
+			resultLabel.SetText("Enter search text")
+			return
+		}
+		
+		text := strings.ToLower(e.entry.Text)
+		search := strings.ToLower(searchText)
+		
+		index := strings.Index(text[lastIndex:], search)
+		if index >= 0 {
+			foundAt := lastIndex + index
+			lastIndex = foundAt + 1
+			
+			// Count line number
+			lineNum := strings.Count(text[:foundAt], "\n") + 1
+			resultLabel.SetText("Found at line " + string(rune(lineNum+'0')))
+		} else if lastIndex > 0 {
+			// Try from beginning
+			lastIndex = 0
+			index = strings.Index(text, search)
+			if index >= 0 {
+				lineNum := strings.Count(text[:index], "\n") + 1
+				resultLabel.SetText("Found at line " + string(rune(lineNum+'0')) + " (wrapped)")
+				lastIndex = index + 1
+			} else {
+				resultLabel.SetText("Not found")
+			}
+		} else {
+			resultLabel.SetText("Not found")
+		}
+	}
+	
+	findEntry.OnSubmitted = func(s string) { findNext() }
+	
 	d.SetButtons([]fyne.CanvasObject{
-		widget.NewButton("Find Next", findFunc),
+		widget.NewButton("Find Next", findNext),
 		widget.NewButton("Close", d.Hide),
 	})
 	
+	d.Resize(fyne.NewSize(300, 150))
 	d.Show()
 }
 
@@ -181,22 +160,23 @@ func (e *Editor) ShowReplaceDialog() {
 	replaceEntry := widget.NewEntry()
 	replaceEntry.PlaceHolder = "Replace with..."
 	
-	form := container.NewVBox(
+	resultLabel := widget.NewLabel("")
+	
+	content := container.NewVBox(
 		widget.NewLabel("Find:"),
 		findEntry,
 		widget.NewLabel("Replace:"),
 		replaceEntry,
+		resultLabel,
 	)
-	
-	content := widget.NewCard("Find and Replace", "", form)
-	content.Resize(fyne.NewSize(350, 200))
 	
 	d := dialog.NewCustom("Find and Replace", "Close", content, e.controller.window)
 	
-	replaceFunc := func() {
+	replaceOne := func() {
 		find := findEntry.Text
 		replace := replaceEntry.Text
 		if find == "" {
+			resultLabel.SetText("Enter search text")
 			return
 		}
 		
@@ -204,27 +184,38 @@ func (e *Editor) ShowReplaceDialog() {
 		if strings.Contains(text, find) {
 			newText := strings.Replace(text, find, replace, 1)
 			e.entry.SetText(newText)
+			resultLabel.SetText("Replaced 1 occurrence")
+		} else {
+			resultLabel.SetText("Not found")
 		}
 	}
 	
-	replaceAllFunc := func() {
+	replaceAll := func() {
 		find := findEntry.Text
 		replace := replaceEntry.Text
 		if find == "" {
+			resultLabel.SetText("Enter search text")
 			return
 		}
 		
 		text := e.entry.Text
-		newText := strings.ReplaceAll(text, find, replace)
-		e.entry.SetText(newText)
+		count := strings.Count(text, find)
+		if count > 0 {
+			newText := strings.ReplaceAll(text, find, replace)
+			e.entry.SetText(newText)
+			resultLabel.SetText("Replaced " + string(rune(count+'0')) + " occurrences")
+		} else {
+			resultLabel.SetText("Not found")
+		}
 	}
 	
 	d.SetButtons([]fyne.CanvasObject{
-		widget.NewButton("Replace", replaceFunc),
-		widget.NewButton("Replace All", replaceAllFunc),
+		widget.NewButton("Replace", replaceOne),
+		widget.NewButton("Replace All", replaceAll),
 		widget.NewButton("Close", d.Hide),
 	})
 	
+	d.Resize(fyne.NewSize(350, 200))
 	d.Show()
 }
 

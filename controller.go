@@ -24,7 +24,8 @@ type AppController struct {
 // NewAppController creates a new application controller
 func NewAppController(window fyne.Window) *AppController {
 	return &AppController{
-		window: window,
+		window:   window,
+		modified: false,
 	}
 }
 
@@ -50,15 +51,24 @@ func (c *AppController) SetSaveMenuItem(item *fyne.MenuItem) {
 
 // OnTextChanged handles text changes in the editor
 func (c *AppController) OnTextChanged(content string) {
-	// Update preview with the content
-	c.preview.UpdateContent(content)
+	// Update preview
+	if c.preview != nil {
+		c.preview.UpdateContent(content)
+	}
 	
-	c.modified = true
-	c.updateTitle()
-	c.updateStatus()
-	if c.saveMenuItem != nil && c.currentFile != nil {
+	// Mark as modified
+	if !c.modified {
+		c.modified = true
+		c.updateTitle()
+	}
+	
+	// Enable save menu item
+	if c.saveMenuItem != nil {
 		c.saveMenuItem.Disabled = false
 	}
+	
+	// Update status
+	c.updateStatus()
 }
 
 // NewFile creates a new file
@@ -111,6 +121,10 @@ func (c *AppController) Open() {
 		c.modified = false
 		c.updateTitle()
 		c.updateStatus()
+		
+		if c.saveMenuItem != nil {
+			c.saveMenuItem.Disabled = true
+		}
 	}, c.window)
 
 	openDialog.SetFilter(storage.NewExtensionFileFilter([]string{".md", ".markdown", ".txt"}))
@@ -164,10 +178,17 @@ func (c *AppController) saveToFile(uri fyne.URI) {
 	c.modified = false
 	c.updateTitle()
 	c.updateStatus()
-	c.statusBar.SetText(fmt.Sprintf("Saved: %s", uri.Name()))
+	
+	if c.saveMenuItem != nil {
+		c.saveMenuItem.Disabled = true
+	}
+	
+	if c.statusBar != nil {
+		c.statusBar.SetText(fmt.Sprintf("Saved: %s", uri.Name()))
+	}
 }
 
-// Export exports the markdown to HTML
+// ExportHTML exports the markdown to HTML
 func (c *AppController) ExportHTML() {
 	saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
 		if err != nil {
@@ -180,9 +201,15 @@ func (c *AppController) ExportHTML() {
 		defer writer.Close()
 
 		html := c.preview.GetHTML()
-		writer.Write([]byte(html))
+		_, err = writer.Write([]byte(html))
+		if err != nil {
+			dialog.ShowError(err, c.window)
+			return
+		}
 		
-		c.statusBar.SetText(fmt.Sprintf("Exported to: %s", writer.URI().Name()))
+		if c.statusBar != nil {
+			c.statusBar.SetText(fmt.Sprintf("Exported to: %s", writer.URI().Name()))
+		}
 	}, c.window)
 
 	saveDialog.SetFileName("export.html")
@@ -208,27 +235,37 @@ func (c *AppController) HandleClose() {
 
 // InsertMarkdown inserts markdown syntax
 func (c *AppController) InsertMarkdown(before, after string, placeholder string) {
-	c.editor.InsertMarkdown(before, after, placeholder)
+	if c.editor != nil {
+		c.editor.InsertMarkdown(before, after, placeholder)
+	}
 }
 
 // InsertAtLineStart inserts text at the beginning of the current line
 func (c *AppController) InsertAtLineStart(prefix string) {
-	c.editor.InsertAtLineStart(prefix)
+	if c.editor != nil {
+		c.editor.InsertAtLineStart(prefix)
+	}
 }
 
 // TogglePreview toggles the preview pane visibility
 func (c *AppController) TogglePreview() {
-	c.preview.ToggleVisibility()
+	if c.preview != nil {
+		c.preview.ToggleVisibility()
+	}
 }
 
 // ShowFind shows the find dialog
 func (c *AppController) ShowFind() {
-	c.editor.ShowFindDialog()
+	if c.editor != nil {
+		c.editor.ShowFindDialog()
+	}
 }
 
 // ShowReplace shows the replace dialog
 func (c *AppController) ShowReplace() {
-	c.editor.ShowReplaceDialog()
+	if c.editor != nil {
+		c.editor.ShowReplaceDialog()
+	}
 }
 
 func (c *AppController) updateTitle() {
@@ -245,7 +282,7 @@ func (c *AppController) updateTitle() {
 }
 
 func (c *AppController) updateStatus() {
-	if c.statusBar != nil {
+	if c.statusBar != nil && c.editor != nil {
 		content := c.editor.GetContent()
 		lines := strings.Count(content, "\n") + 1
 		words := len(strings.Fields(content))
