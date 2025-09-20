@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -15,12 +16,14 @@ import (
 
 // Preview represents the markdown preview component
 type Preview struct {
-	content     *widget.RichText
-	container   *fyne.Container
+	content         *widget.RichText
+	container       *fyne.Container
 	scrollContainer *container.Scroll
-	visible     bool
-	rawMarkdown string
-	md          goldmark.Markdown
+	placeholder     fyne.CanvasObject
+	visible         bool
+	rawMarkdown     string
+	rendered        string
+	md              goldmark.Markdown
 }
 
 // NewPreview creates a new preview instance
@@ -52,28 +55,64 @@ func (p *Preview) Create() fyne.CanvasObject {
 	p.scrollContainer = container.NewScroll(
 		container.NewPadded(p.content),
 	)
-	
-	header := widget.NewCard("", "Preview", nil)
-	
-	p.container = container.NewBorder(
-		container.NewPadded(header),
-		nil, nil, nil,
-		p.scrollContainer,
+	p.scrollContainer.Hide()
+
+	placeholderLabel := widget.NewLabelWithStyle(
+		"Live preview will appear here as you type.",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{Italic: true},
 	)
+	p.placeholder = container.NewCenter(placeholderLabel)
+
+	title := widget.NewLabelWithStyle("Preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	titleContainer := container.NewBorder(nil, widget.NewSeparator(), nil, nil, container.NewPadded(title))
+
+	body := container.NewMax(p.scrollContainer, p.placeholder)
+
+	p.container = container.NewBorder(
+		titleContainer,
+		nil,
+		nil,
+		nil,
+		body,
+	)
+
+	p.UpdateContent(p.rawMarkdown)
 	return p.container
 }
 
 // UpdateContent updates the preview with new markdown content
 func (p *Preview) UpdateContent(markdown string) {
 	p.rawMarkdown = markdown
-	
+
+	if p.scrollContainer == nil || p.placeholder == nil {
+		return
+	}
+
+	trimmed := strings.TrimSpace(markdown)
+	if trimmed == "" {
+		p.rendered = ""
+		p.content.ParseMarkdown("")
+		p.scrollContainer.Hide()
+		p.placeholder.Show()
+		return
+	}
+
+	if markdown == p.rendered {
+		p.placeholder.Hide()
+		p.scrollContainer.Show()
+		return
+	}
+
+	p.placeholder.Hide()
+	p.scrollContainer.Show()
+
 	// Use Fyne's built-in markdown parsing for the preview
 	p.content.ParseMarkdown(markdown)
-	
+
 	// Refresh the scroll container to ensure proper rendering
-	if p.scrollContainer != nil {
-		p.scrollContainer.Refresh()
-	}
+	p.scrollContainer.Refresh()
+	p.rendered = markdown
 }
 
 // ToggleVisibility toggles the preview pane visibility
@@ -81,7 +120,7 @@ func (p *Preview) ToggleVisibility() {
 	if p.container == nil {
 		return
 	}
-	
+
 	if p.visible {
 		p.container.Hide()
 	} else {
@@ -93,11 +132,11 @@ func (p *Preview) ToggleVisibility() {
 // GetHTML returns the markdown converted to HTML
 func (p *Preview) GetHTML() string {
 	var buf bytes.Buffer
-	
+
 	if err := p.md.Convert([]byte(p.rawMarkdown), &buf); err != nil {
 		return fmt.Sprintf("<p>Error converting markdown: %v</p>", err)
 	}
-	
+
 	htmlTemplate := `<!DOCTYPE html>
 <html>
 <head>
@@ -210,6 +249,6 @@ func (p *Preview) GetHTML() string {
 %s
 </body>
 </html>`
-	
+
 	return fmt.Sprintf(htmlTemplate, buf.String())
 }
